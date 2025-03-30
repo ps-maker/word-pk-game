@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>免费中英文PK</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        #loginBox { text-align: center; }
+        #gameBox { display: none; }
+        .word-card {
+            padding: 15px;
+            margin: 10px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            cursor: pointer;
+            background: #f8f9fa;
+        }
+        .matched {
+            background: #ffebee !important;
+            border-color: #ff6b81 !important;
+        }
+        #statusBar {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(255,255,255,0.9);
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <div id="loginBox">
+        <h2>单词大作战</h2>
+        <input type="text" id="userName" placeholder="输入你的名字">
+        <button onclick="startGame()">开始匹配</button>
+    </div>
+
+    <div id="gameBox">
+        <div id="statusBar">
+            对手：<span id="rivalName">等待中...</span><br>
+            得分：<span id="rivalScore">0</span>
+        </div>
+        <div id="cardGrid"></div>
+    </div>
+
+    <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+    <script>
+        // ===== 配置区 =====
+        const SUPABASE_URL = "你的Supabase项目URL";
+        const SUPABASE_KEY = "你的Supabase公钥";
+        const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        // ===== 完整16组数据 =====
+        const FULL_DATA = [
+            ["眼神接触少或不一致", "Making little/inconsistent eye contact"],
+            ["看似不注意说话者", "Appearing not looking at/listening to people talking"],
+            ["极少分享兴趣或情绪", "Infrequently sharing interest/emotion"],
+            ["对名字或呼唤无反应或反应迟钝", "Not responding/being slow to respond to one's name/verbal bids"],
+            ["对话互动困难", "Having difficulties with back-and-forth conversation"],
+            ["单向谈论话题", "Talking without noticing others' interest or giving others a chance to respond"],
+            ["表情动作不协调", "Mismatched facial expressions/gestures"],
+            ["语调异常", "Unusual tone of voice"],
+            ["难以理解他人观点", "Having trouble understanding others' perspectives"],
+            ["社交场景适应困难", "Difficulties adjusting to social situations"],
+            ["想象性游戏或交友障碍", "Difficulties sharing in imaginative play or in making friends"],
+            ["重复特定行为或不寻常行为", "Repeating certain behaviors or having unusual behaviors"],
+            ["对特定主题强烈兴趣", "Lasting intense interest in specific topics"],
+            ["过度关注移动的物体或物体的部分", "Overly focused interest with moving objects or object parts"],
+            ["因日常微小变化而烦躁", "Becoming upset by slight changes in a routine"],
+            ["对感官输入过度敏感或低敏感", "Over-/under-sensitive to sensory input"]
+        ];
+
+        // ===== 游戏逻辑 =====
+        let currentPlayer = { id: null, score: 0 };
+
+        async function startGame() {
+            const userName = document.getElementById('userName').value;
+            if (!userName) return alert("请输入名字");
+
+            // 1. 创建玩家记录
+            const { data, error } = await supabase
+                .from('players')
+                .insert([{ name: userName, score: 0, status: 'waiting' }])
+                .select();
+            
+            currentPlayer.id = data[0].id;
+            
+            // 2. 切换界面
+            document.getElementById('loginBox').style.display = 'none';
+            document.getElementById('gameBox').style.display = 'block';
+
+            // 3. 开始匹配
+            setupRealtime();
+        }
+
+        function setupRealtime() {
+            // 实时监听新玩家
+            supabase.channel('public:players')
+                .on('postgres_changes', 
+                    { event: 'INSERT', schema: 'public' },
+                    async (payload) => {
+                        if (payload.new.status === 'waiting' && payload.new.id !== currentPlayer.id) {
+                            startBattle(payload.new.id);
+                        }
+                    }
+                )
+                .subscribe();
+        }
+
+        async function startBattle(rivalId) {
+            // 生成题目
+            const questions = FULL_DATA.sort(() => Math.random() - 0.5).slice(0, 10);
+            
+            // 渲染游戏界面
+            renderCards(questions);
+            
+            // 监听对手状态
+            supabase.channel(`room:${rivalId}`)
+                .on('postgres_changes', 
+                    { event: 'UPDATE', schema: 'public', table: 'players' },
+                    (payload) => {
+                        if (payload.new.id === rivalId) {
+                            document.getElementById('rivalName').textContent = payload.new.name;
+                            document.getElementById('rivalScore').textContent = payload.new.score;
+                        }
+                    }
+                )
+                .subscribe();
+        }
+
+        function renderCards(questions) {
+            const grid = document.getElementById('cardGrid');
+            grid.innerHTML = '';
+            
+            // 合并并打乱题目
+            const allWords = questions.flatMap(pair => pair)
+                .sort(() => Math.random() - 0.5)
+                .map(word => `
+                    <div class="word-card" onclick="handleClick('${word}', this)">
+                        ${word}
+                    </div>
+                `).join('');
+            
+            grid.innerHTML = allWords;
+        }
+
+        let selected = [];
+        async function handleClick(word, element) {
+            if (element.classList.contains('matched')) return;
+
+            selected.push({ word, element });
+            element.style.background = '#e3f2fd';
+
+            if (selected.length === 2) {
+                const isMatched = checkMatch(selected[0].word, selected[1].word);
+                
+                // 更新分数
+                const newScore = isMatched ? currentPlayer.score + 10 : Math.max(0, currentPlayer.score -5);
+                const { error } = await supabase
+                    .from('players')
+                    .update({ score: newScore })
+                    .eq('id', currentPlayer.id);
+
+                // 更新界面
+                if (isMatched) {
+                    selected.forEach(c => c.element.classList.add('matched'));
+                    currentPlayer.score = newScore;
+                    if (currentPlayer.score >= 100) alert("🎉 你赢了！");
+                } else {
+                    currentPlayer.score = newScore;
+                }
+                selected = [];
+            }
+        }
+
+        function checkMatch(a, b) {
+            return FULL_DATA.some(pair => 
+                (pair[0] === a && pair[1] === b) || 
+                (pair[0] === b && pair[1] === a)
+        }
+    </script>
+</body>
+</html>
